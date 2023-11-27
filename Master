@@ -1,0 +1,314 @@
+.equ LCDPORT = PORTA ; Set signal port reg to PORTA
+.equ LCDPORTDIR = DDRA ; Set signal port dir reg to PORTA
+.equ LCDPORTPIN = PINA ; Set clear signal port pin reg to PORTA
+.equ LCD_RS = PINA0
+.equ LCD_RW = PINA1
+.equ LCD_EN = PINA2
+.equ LCD_D7 = PINA7
+.equ LCD_D6 = PINA6
+.equ LCD_D5 = PINA5
+.equ LCD_D4 = PINA4
+.EQU SW=0 ;k? hi?u ch?n SW
+.EQU SS=4 ;k? hi?u ch?n /SS
+.EQU MOSI=5 ;k? hi?u ch?n MOSI
+.EQU MISO=6 ;k? hi?u ch?n MISO
+.EQU SCK=7 ;k? hi?u ch?n SCK
+.EQU NULL=$00 ;m? k?t th?c chu?i k? t?
+.ORG 0
+	RJMP START
+.ORG 0x02
+	RJMP INIT0_IRQ
+START:
+	CALL INTERUPT_INIT
+	CALL Port_Init
+	CALL UART0_INIT
+	SEI
+MAIN: 
+	RJMP MAIN 
+
+INIT0_IRQ: 
+	PUSH R16
+	CBI PORTD,0 ; MASTER IS BUSY
+	CBI PORTB,4 ; START SPI
+	NOP
+	NOP
+SPI_TRANS:
+	LDI R17,0X00
+	OUT SPDR0,R17 ;ghi data ra SPI
+WAIT_SPI:
+	IN R16,SPSR0 ;??c c? SPIF0
+	SBRS R16,SPIF0 ;c? SPIF0=1 truy?n SPI xong
+	RJMP WAIT_SPI ;ch? c? SPIF0=1
+	SBI PORTB,4 ; STOP SPI
+	IN R20,SPDR0 ;??c data t? SPI
+	MOV R18,R20
+///---------TRANSMIT DATA TO UART------------///
+	ldi ZH,high(table*2)
+	ldi ZL,low(table*2)
+	add ZL,r20
+	clr r20
+	adc ZH,r20
+	lpm r16,Z
+	CALL USART_SendChar
+///-----------TRANSMIT DATA TO LCD-----------///
+	call display_LCD
+	SBI PORtD,0 
+	POP R16
+	RETI
+
+
+///---------INTERRUPT INIT---------///
+INTERUPT_INIT:
+	push R16
+	ldi r16,(1<<ISC01)
+	sts EICRA,R16
+	sbi portd,2
+	// INT0 enable, falling active
+	ldi R16, (1<<INT0)
+	out EIMSK, R16
+	pop R16
+	ret
+///-----------Port Init-----------///
+Port_Init:
+;-------------------------
+	SBI DDRD,0 ; PD0 OUTPUT BUSY SIGNAL
+	SBI PORTD,0 ; MASTER IS FREE
+;-------Port LCD--------;
+	LDI R16,0XFF
+	OUT DDRA,R16 ;khai b?o PortA for LCD
+;-------Port SPI--------;
+	LDI R16,(1<<PB4)|(1<<PB5)|(1<<PB7);khai b?o c?c output SPI
+	OUT DDRB,R16
+	SBI PORTB,4 ;STOP SPI
+	;SPI Master,SCK=Fosc/16,cho ph?p SPI
+	LDI R16,(1<<SPE0)|(1<<MSTR0)|(1<<SPR00)
+	OUT SPCR0,R16
+	RET	
+///-----------Uart Init-----------///
+UART0_INIT:
+	LDI R16,0x00 
+	STS UBRR0H,R16
+	LDI R16,51 
+	STS UBRR0L,R16
+ ; Set frame format: 8 data bits, no parity, 1 stop bit
+	ldi r16, (1 << UCSZ01) | (1 << UCSZ00)
+	sts UCSR0C, r16
+ ; Enable transmitter and receiver
+	ldi r16, (1 << TXEN0) 
+	sts UCSR0B, r16
+	ret
+///--------SEND UART--------///
+USART_SendChar:
+	push r17
+ ; Wait for the transmitter to be ready
+USART_SendChar_Wait:
+	lds r17, UCSR0A
+	sbrs r17, UDRE0 ;check USART Data Register Empty bit
+	rjmp USART_SendChar_Wait
+	STS UDR0,R16
+	pop r17
+	ret
+//////////////////////////////Display_LCD///////////////////////////////
+display_LCD: 
+	call LCD_Init 
+	ldi ZH, high(initial)
+	ldi ZL, low(initial)
+	call LCD_Send_String
+	ret
+/////////////////////////////Send_String///////////////////////////////
+.def LCDData = r16
+LCD_Send_String:
+push R18
+push ZH ; preserve pointer registers
+push ZL
+push LCDData
+push R20
+ldi R20,2 ; counter printing char
+; fix up the pointers for use with the 'lpm' instruction
+lsl ZL ; shift the pointer one bit left for the lpm instruction
+rol ZH
+; write the string of characters
+LCD_Send_String_01:
+lpm LCDData, Z+ ; get a character
+cpi LCDData, 0 ; check for end of string
+breq LCD_Send_String_02 ; done
+; arrive here if this is a valid character
+ldi R17,0
+CPI R20,2
+BReq hundreds
+CPI R20,1
+BReq tens
+mov R17,R18
+print_num:
+dec R20
+add LCDDATA,R17
+call LCD_Send_Data ; display the character
+rjmp LCD_Send_String_01 ; not done, send another character
+; arrive here when all characters in the message have been sent to the LCD module
+
+LCD_Send_String_02:
+pop R20
+pop LCDData
+pop ZL
+pop ZH
+pop R18
+ret
+tens:
+INC R17
+SUBI R18,10
+BRSH tens
+DEC R17
+ldi R21,10
+ADD R18,R21
+jmp print_num
+hundreds:
+INC R17
+SUBI R18,100
+BRSH hundreds
+DEC R17
+ldi R21,100
+ADD R18,R21
+jmp print_num
+
+////////////////////////////////////Send Data//////////////////////////
+LCD_Send_Data:
+push r17
+call LCD_wait_busy ;check if LCD is busy
+mov r17,r16 ;save the command
+ ; Set RS high to select data register
+ ; Set RW low to write to LCD
+andi r17,0xF0
+ori r17,0x01
+ ; Send data to LCD
+ out LCDPORT, r17 
+nop
+ ; Pulse enable pin
+ sbi LCDPORT, LCD_EN
+ nop
+ cbi LCDPORT, LCD_EN
+ ; Delay for command execution
+;send the lower nibble
+nop
+ swap r16
+andi r16,0xF0
+; Set RS high to select data register
+ ; Set RW low to write to LCD
+andi r16,0xF0
+ori r16,0x01
+ ; Send command to LCD
+ out LCDPORT, r16
+nop
+ ; Pulse enable pin
+ sbi LCDPORT, LCD_EN
+ nop
+ cbi LCDPORT, LCD_EN
+pop r17
+ ret
+//////////////////////////////////Send Command//////////////////////////
+; Subroutine to send command to LCD
+;Command code in r16
+;LCD_D7..LCD_D4 connect to PA7..PA4
+;LCD_RS connect to PA0
+;LCD_RW connect to PA1
+;LCD_EN connect to PA2
+LCD_Send_Command:
+push r17
+call LCD_wait_busy ; check if LCD is busy 
+mov r17,r16 ;save the command
+ ; Set RS low to select command register
+ ; Set RW low to write to LCD
+andi r17,0xF0
+ ; Send command to LCD
+ out LCDPORT, r17
+ nop
+nop
+ ; Pulse enable pin
+ sbi LCDPORT, LCD_EN
+ nop
+ nop
+ cbi LCDPORT, LCD_EN
+ swap r16
+andi r16,0xF0
+ ; Send command to LCD
+ out LCDPORT, r16 
+ ; Pulse enable pin
+ sbi LCDPORT, LCD_EN
+nop
+nop
+cbi LCDPORT, LCD_EN
+pop r17
+ ret
+
+/////////////////////////////////////Wait busy//////////////////////////////////////////
+LCD_wait_busy:
+push r16
+ldi r16, 0b00000111 ; set PA7-PA4 as input, PA2-PA0 as output
+ out LCDPORTDIR, r16
+ldi r16,0b11110010 ; set RS=0, RW=1 for read the busy flag
+out LCDPORT, r16
+nop
+LCD_wait_busy_loop:
+ sbi LCDPORT, LCD_EN
+ nop
+nop
+in r16, LCDPORTPIN
+cbi LCDPORT, LCD_EN
+nop
+sbi LCDPORT, LCD_EN
+ nop
+nop
+ cbi LCDPORT, LCD_EN
+nop
+andi r16,0x80
+cpi r16,0x80
+breq LCD_wait_busy_loop
+ldi r16, 0b11110111 ; set PA7-PA4 as output, PA2-PA0 as output
+ out LCDPORTDIR, r16
+ldi r16,0b00000000 ; set RS=0, RW=1 for read the busy flag
+out LCDPORT, r16
+pop r16
+ret
+//////////////////////////////////LCD Init///////////////////////////////
+LCD_Init:
+ push r16
+ ; Set up data direction register for Port A
+ ldi r16, 0b11110111 ; set PA7-PA4 as outputs, PA2-PA0 as output
+ out LCDPORTDIR, r16
+ ; Wait for LCD to power up
+ call DELAY_10MS
+call DELAY_10MS
+ 
+ ; Send initialization sequence
+ldi r16, 0x02 ; Function Set: 4-bit interface
+ call LCD_Send_Command
+ ldi r16, 0x28 ; Function Set: enable 5x7 mode for chars 
+ call LCD_Send_Command
+ldi r16, 0x0E ; Display Control: Display OFF, Cursor ON
+ call LCD_Send_Command
+ ldi r16, 0x01 ; Clear Display
+ call LCD_Send_Command
+ ldi r16, 0x80 ; Clear Display
+ call LCD_Send_Command
+ pop r16
+ ret
+ /////////////////////////////////Delay_10MS///////////////////////
+DELAY_10MS: 
+	push R16
+	push R17
+	LDI R16,80
+LOOP1: ; 80000MC = 80*1000MC => cycle count >= 80000 (MC= 125ns)
+	LDI R17,250 ;1MC
+LOOP2: ; 4*250 = 1000MC
+	DEC R17 ; 1MC
+	NOP ;1MC
+	BRNE LOOP2 ;2/1MC
+	DEC R16
+	BRNE LOOP1
+	pop R16
+	pop R17
+	RET
+.CSEG 
+table: .db  '0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F'
+;.org INT_VECTORS_SIZE
+initial:	.DB "000",0
+
