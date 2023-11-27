@@ -1,0 +1,115 @@
+
+///--------------CONNECT--------------//
+////---SCANKEY---///
+; PortA of AVR2 connected to the keypad port
+; R23 output
+////---SPI---////
+; SS, MOSI, MISO, SCK pins in PortB connected to Master's PortB
+; PC0 pin connected to Master's INT0
+.EQU OUTPORT=PORTC ; IRQ_PORT PC0; PC1 busy
+.EQU OUTPORT_DR=DDRC
+.EQU SS=4 ; /SS pin symbol
+.EQU MISO=6 ; MISO pin symbol
+;.EQU NULL=$00 ; Null string termination code
+.ORG 0
+    RJMP START
+.ORG 0X40
+START:
+    LDI R16,HIGH(RAMEND) ; Lift stack to high memory area
+    OUT SPH,R16
+    LDI R16,LOW(RAMEND)
+    OUT SPL,R16
+    RCALL PORT_INIT
+    RCALL SPI_INIT
+
+MAIN:
+    RCALL SCANKEY
+    CPI R23, 0XFF ; IF NOT PRESS KEYPAD => CHECK AGAIN 
+    BREQ DONE
+WAIT_MASTER:
+    SBIS PINC,1 
+    JMP WAIT_MASTER
+    RCALL SPI_TRANS
+DONE:
+    RJMP MAIN
+///--------------PORT INIT---------------///
+PORT_INIT:
+    CBI DDRC,1  ; Pin PC1 input check if the master is busy 
+    SBI DDRC,0  ; PC0 output - IRQ signal (LOW ACTIVE)
+    SBI PORTC,0 ; TURN OFF IRQ signal
+    RET
+///--------------SPI OF AVR2-------------///
+SPI_INIT:
+    LDI R16,(1<<PB6) ; Declare MISO pin as output for SPI
+    OUT DDRB,R16
+    LDI R16,(1<<SPE0) ; Enable SPI for Slave
+    OUT SPCR0,R16
+    RET
+///----------SCAN KEYPAD---------------///
+; PortA of AVR2 connected to the keypad port
+; R23 output
+SCANKEY:
+    LDI R20, 0b00001111 ; Set upper 4 bits of PORTA as input with pull-up, lower 4 
+    ;bits as output
+    OUT DDRA, R20
+    LDI R20, 0b11110000 ; Enable pull-up resistor 
+    OUT PORTA, R20
+    LDI R22, 0b11110111 ; Initial column mask
+    LDI R23, 0 ; Initial pressed row value
+    LDI R24,3 ; Scanning column index
+KEYPAD_SCAN_LOOP:
+    OUT PORTA, R22 ; Scan current column
+    NOP
+    SBIC PINA, 4 ; Check row 0
+    RJMP KEYPAD_SCAN_CHECK_COL2
+    RJMP KEYPAD_SCAN_FOUND ; Row 0 is pressed
+KEYPAD_SCAN_CHECK_COL2:
+    SBIC PINA, 5 ; Check row 1
+    RJMP KEYPAD_SCAN_CHECK_COL3
+    LDI R23, 1 ; Row 1 is pressed
+    RJMP KEYPAD_SCAN_FOUND
+KEYPAD_SCAN_CHECK_COL3:
+    SBIC PINA, 6 ; Check row 2
+    RJMP KEYPAD_SCAN_CHECK_COL4
+    LDI R23, 2 ; Row 2 is pressed
+    RJMP KEYPAD_SCAN_FOUND
+KEYPAD_SCAN_CHECK_COL4:
+    SBIC PINA, 7 ; Check row 3
+    RJMP KEYPAD_SCAN_NEXT_ROW
+    LDI R23, 3 ; Row 3 is pressed
+    RJMP KEYPAD_SCAN_FOUND
+KEYPAD_SCAN_NEXT_ROW:
+    ; Check if all rows have been scanned
+    CPI R24,0
+    BREQ KEYPAD_SCAN_NOT_FOUND
+    ; Shift row mask to scan the next row
+    ROR R22
+    DEC R24 ; Increase row index
+    RJMP KEYPAD_SCAN_LOOP
+KEYPAD_SCAN_FOUND:
+    ; Combine row and column to get the key value (0-15)
+    ; Key code = row * 4 + col
+    LSL R23 ; Shift row value 4 bits to the left
+    LSL R23
+    ADD R23, R24 ; Add row value to column value
+    RET
+KEYPAD_SCAN_NOT_FOUND:
+    LDI R23, 0xFF ; No key pressed
+    RET
+
+////-------------RECEIVE/TRANS DATA VIA SPI------------------////
+
+; SPI_TRANS transfers SPI data between Master and Slave
+; Input: R23 contains data to be written to Slave
+; Output: PC0 contains CONTROL SIGNAL IRQ
+
+; --------------------------------------------------------
+SPI_TRANS:
+    CBI OUTPORT,0  ; Enable IRQ
+WAIT_SYSN:
+    SBIC PINB,4 ; WAIT TO SEND VIA SPI
+    JMP WAIT_SYSN
+    OUT SPDR0,R23 ; Write data to SPI
+    ;RJMP WAIT_SPI ; Wait for SPIF0=1
+    SBI OUTPORT,0
+    RET
